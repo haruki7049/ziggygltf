@@ -18,7 +18,6 @@ const print = std.debug.print;
 const assert = std.debug.assert;
 const ArrayList = std.ArrayList;
 const Allocator = std.mem.Allocator;
-const ArenaAllocator = std.heap.ArenaAllocator;
 const Mat4 = helpers.Mat4;
 const Vec3 = helpers.Vec3;
 const Quat = helpers.Quat;
@@ -76,17 +75,14 @@ pub const Data = struct {
     lights: []Light,
 };
 
-arena: *ArenaAllocator,
+allocator: std.mem.Allocator,
 data: Data,
 
 glb_binary: ?[]const u8 = null,
 
 pub fn init(allocator: Allocator) !Self {
-    const arena = try allocator.create(ArenaAllocator);
-    arena.* = ArenaAllocator.init(allocator);
-
     return Self{
-        .arena = arena,
+        .allocator = allocator,
         .data = .{
             .asset = Asset{ .version = "Undefined" },
             .scenes = &[_]Scene{},
@@ -108,8 +104,42 @@ pub fn init(allocator: Allocator) !Self {
 }
 
 pub fn deinit(self: Self) void {
-    self.arena.deinit();
-    self.arena.child_allocator.destroy(self.arena);
+    self.allocator.free(self.data.cameras);
+    self.allocator.free(self.data.skins);
+    self.allocator.free(self.data.accessors);
+    self.allocator.free(self.data.buffers);
+    self.allocator.free(self.data.buffer_views);
+    self.allocator.free(self.data.materials);
+    self.allocator.free(self.data.textures);
+    self.allocator.free(self.data.animations);
+    self.allocator.free(self.data.samplers);
+    self.allocator.free(self.data.images);
+    self.allocator.free(self.data.lights);
+
+    // Memory free for the items for nodes.children
+    for (self.data.nodes) |node| {
+        self.allocator.free(node.children);
+    }
+    self.allocator.free(self.data.nodes);
+
+    // Memory free for the items for scenes.nodes
+    for (self.data.scenes) |scene| {
+        if (scene.nodes != null) {
+            self.allocator.free(scene.nodes.?);
+        }
+    }
+    self.allocator.free(self.data.scenes);
+
+    // Memory free for the itmes in meshes array
+    for (self.data.meshes) |mesh| {
+        // Memory free for the items in primitives.attributes
+        for (mesh.primitives) |primitive| {
+            self.allocator.free(primitive.attributes);
+        }
+
+        self.allocator.free(mesh.primitives);
+    }
+    self.allocator.free(self.data.meshes);
 }
 
 pub fn read(allocator: std.mem.Allocator, reader: anytype) anyerror!Self {
@@ -259,7 +289,7 @@ fn parseGltfJson(allocator: std.mem.Allocator, gltf_json: []const u8) !Self {
     var gltf_parsed = try json.parseFromSlice(json.Value, allocator, gltf_json, .{});
     defer gltf_parsed.deinit();
 
-    var result: Self = undefined;
+    var result: Self = try Self.init(allocator);
 
     const gltf: *json.Value = &gltf_parsed.value;
 
@@ -1273,38 +1303,21 @@ test "gltf refAllDecls" {
 
 test "assets/box" {
     const allocator = std.testing.allocator;
-    const arena = try allocator.create(ArenaAllocator);
-    arena.* = ArenaAllocator.init(allocator);
 
     const box_binary = @embedFile("./assets/box/Box.gltf");
     var reader = std.Io.Reader.fixed(box_binary);
     const actual: Self = try Self.read(allocator, &reader);
     defer actual.deinit();
 
-    const expected: Self = .{
-        .arena = arena,
-        .data = .{
-            .asset = Asset{ .version = "Undefined" },
-            .scenes = &[_]Scene{},
-            .nodes = &[_]Node{},
-            .cameras = &[_]Camera{},
-            .meshes = &[_]Mesh{},
-            .materials = &[_]Material{},
-            .skins = &[_]Skin{},
-            .samplers = &[_]TextureSampler{},
-            .images = &[_]Image{},
-            .animations = &[_]Animation{},
-            .textures = &[_]Texture{},
-            .accessors = &[_]Accessor{},
-            .buffer_views = &[_]BufferView{},
-            .buffers = &[_]Buffer{},
-            .lights = &[_]Light{},
-        },
-        .glb_binary = "Box0.bin",
-    };
+    var expected = try Self.init(allocator);
+    expected.data.asset.version = "2.0";
+    expected.data.asset.generator = "COLLADA2GLTF";
+    expected.data.scene = 0;
+    expected.data.scenes = try allocator.alloc(Scene, 1);
+    expected.data.scenes[0] = .{ .name = null, .nodes = try allocator.alloc(usize, 1), .extras = null };
+    expected.data.scenes[0].nodes.?[0] = 0;
 
-    // try std.testing.expectEqual(expected.arena, actual.arena);
-    try std.testing.expect(expected.glb_binary != null);
-    try std.testing.expect(actual.glb_binary != null);
-    try std.testing.expectEqualStrings(expected.glb_binary.?, actual.glb_binary.?);
+    defer expected.deinit();
+
+    try std.testing.expectEqualDeep(expected, actual);
 }
