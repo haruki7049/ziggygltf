@@ -76,14 +76,17 @@ pub const Data = struct {
     lights: []Light,
 };
 
-allocator: std.mem.Allocator,
+arena: *ArenaAllocator,
 data: Data,
 
-glb_binary: ?[]align(4) const u8 = null,
+glb_binary: ?[]const u8 = null,
 
-pub fn init(allocator: Allocator) Self {
+pub fn init(allocator: Allocator) !Self {
+    const arena = try allocator.create(ArenaAllocator);
+    arena.* = ArenaAllocator.init(allocator);
+
     return Self{
-        .allocator = allocator,
+        .arena = arena,
         .data = .{
             .asset = Asset{ .version = "Undefined" },
             .scenes = &[_]Scene{},
@@ -102,6 +105,11 @@ pub fn init(allocator: Allocator) Self {
             .lights = &[_]Light{},
         },
     };
+}
+
+pub fn deinit(self: Self) void {
+    self.arena.deinit();
+    self.arena.child_allocator.destroy(self.arena);
 }
 
 pub fn read(allocator: std.mem.Allocator, reader: anytype) anyerror!Self {
@@ -149,11 +157,12 @@ pub fn getGlobalTransform(data: *const Data, node: Node) Mat4 {
     return node_transform;
 }
 
-fn isGlb(glb_buffer: []align(4) const u8) bool {
+fn isGlb(glb_buffer: []const u8) bool {
     const GLB_MAGIC_NUMBER: u32 = 0x46546C67; // 'gltf' in ASCII.
-    const fields = @as([*]const u32, @ptrCast(glb_buffer));
+    const buf = glb_buffer[0..4];
+    const actual = std.mem.readInt(u32, buf, .little);
 
-    return fields[0] == GLB_MAGIC_NUMBER;
+    return actual == GLB_MAGIC_NUMBER;
 }
 
 fn parseGlb(self: *Self, glb_buffer: []align(4) const u8) !void {
@@ -1211,6 +1220,8 @@ fn parseGltfJson(allocator: std.mem.Allocator, gltf_json: []const u8) !Self {
             }
         }
     }
+
+    return result;
 }
 
 // In 'gltf' files, often values are array indexes;
@@ -1258,4 +1269,42 @@ test "gltf refAllDecls" {
     std.testing.refAllDecls(Self);
     std.testing.refAllDecls(types);
     std.testing.refAllDecls(helpers);
+}
+
+test "assets/box" {
+    const allocator = std.testing.allocator;
+    const arena = try allocator.create(ArenaAllocator);
+    arena.* = ArenaAllocator.init(allocator);
+
+    const box_binary = @embedFile("./assets/box/Box.gltf");
+    var reader = std.Io.Reader.fixed(box_binary);
+    const actual: Self = try Self.read(allocator, &reader);
+    defer actual.deinit();
+
+    const expected: Self = .{
+        .arena = arena,
+        .data = .{
+            .asset = Asset{ .version = "Undefined" },
+            .scenes = &[_]Scene{},
+            .nodes = &[_]Node{},
+            .cameras = &[_]Camera{},
+            .meshes = &[_]Mesh{},
+            .materials = &[_]Material{},
+            .skins = &[_]Skin{},
+            .samplers = &[_]TextureSampler{},
+            .images = &[_]Image{},
+            .animations = &[_]Animation{},
+            .textures = &[_]Texture{},
+            .accessors = &[_]Accessor{},
+            .buffer_views = &[_]BufferView{},
+            .buffers = &[_]Buffer{},
+            .lights = &[_]Light{},
+        },
+        .glb_binary = "Box0.bin",
+    };
+
+    // try std.testing.expectEqual(expected.arena, actual.arena);
+    try std.testing.expect(expected.glb_binary != null);
+    try std.testing.expect(actual.glb_binary != null);
+    try std.testing.expectEqualStrings(expected.glb_binary.?, actual.glb_binary.?);
 }
